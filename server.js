@@ -88,6 +88,37 @@ app.get('/api/offres', async (req, res) => {
   );
   res.json(result.rows);
 });
+// Créer ou mettre à jour un fournisseur
+app.post('/api/fournisseurs', async (req, res) => {
+  const { nom, email, iban, bic } = req.body;
+  const result = await pool.query(
+    `INSERT INTO fournisseurs (nom, email, iban, bic)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (email) DO UPDATE SET iban=$3, bic=$4
+     RETURNING *`,
+    [nom, email, iban, bic]
+  );
+  res.json(result.rows[0]);
+});
+
+// Créer une offre
+app.post('/api/offres', async (req, res) => {
+  const { fournisseur_id, titre, description, prix_xpf } = req.body;
+  const result = await pool.query(
+    `INSERT INTO offres (fournisseur_id, titre, description, prix_xpf)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
+    [fournisseur_id, titre, description, prix_xpf]
+  );
+  res.json(result.rows[0]);
+});
+
+// Lier une photo à une offre
+app.patch('/api/photos/:photoId/offre', async (req, res) => {
+  const { photoId } = req.params;
+  const { offre_id } = req.body;
+  await pool.query('UPDATE photos SET offre_id=$1 WHERE id=$2', [offre_id, photoId]);
+  res.json({ ok: true });
+});
 
 app.get('/', (req, res) => res.send('NC Deals Backend OK'));
 
