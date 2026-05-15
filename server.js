@@ -82,6 +82,12 @@ app.get('/api/admin/photos', async (req, res) => {
   const result = await pool.query("SELECT * FROM photos WHERE statut = 'en_attente' ORDER BY cree_le DESC");
   res.json(result.rows);
 });
+app.get('/api/offres', async (req, res) => {
+  const result = await pool.query(
+    "SELECT o.*, p.url as photo_url FROM offres o LEFT JOIN photos p ON p.offre_id = o.id AND p.statut = 'approuvee' ORDER BY o.cree_le DESC"
+  );
+  res.json(result.rows);
+});
 
 app.get('/', (req, res) => res.send('NC Deals Backend OK'));
 
