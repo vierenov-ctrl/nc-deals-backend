@@ -50,6 +50,7 @@ async function initDB() {
   await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
   await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
   await pool.query("ALTER TABLE offres ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT 'en_attente';");
+  await pool.query("ALTER TABLE offres ADD COLUMN IF NOT EXISTS categorie VARCHAR(50) DEFAULT 'Autres';");
   console.log('Base de données initialisée');
 }
 initDB().catch(console.error);
@@ -126,12 +127,28 @@ app.get('/api/offres', async (req, res) => {
   }
 });
 
+app.get('/api/offres/:id', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT o.*, f.nom as fournisseur_nom, f.email as fournisseur_email
+      FROM offres o
+      LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+      WHERE o.id = $1 AND o.statut = 'approuvee'
+    `, [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Offre introuvable.' });
+    const photos = await pool.query("SELECT url FROM photos WHERE offre_id = $1 AND statut = 'approuvee' ORDER BY cree_le ASC", [req.params.id]);
+    res.json({ ...result.rows[0], photos: photos.rows.map(function(p) { return p.url; }) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/offres', async (req, res) => {
   try {
-    const { fournisseur_id, titre, description, prix_xpf } = req.body;
+    const { fournisseur_id, titre, description, prix_xpf, categorie } = req.body;
     const result = await pool.query(
-      "INSERT INTO offres (fournisseur_id, titre, description, prix_xpf, statut) VALUES ($1, $2, $3, $4, 'en_attente') RETURNING id",
-      [fournisseur_id, titre, description || null, prix_xpf || 0]
+      "INSERT INTO offres (fournisseur_id, titre, description, prix_xpf, categorie, statut) VALUES ($1, $2, $3, $4, $5, 'en_attente') RETURNING id",
+      [fournisseur_id, titre, description || null, prix_xpf || 0, categorie || 'Autres']
     );
     res.json({ id: result.rows[0].id });
   } catch (e) {
