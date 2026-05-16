@@ -1,4 +1,7 @@
 require('dotenv').config();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'nc-deals-secret-2026';
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
@@ -38,6 +41,7 @@ async function initDB() {
       cree_le TIMESTAMP DEFAULT NOW()
     );
   `);
+  await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
   console.log('Base de données initialisée');
 }
 
@@ -133,4 +137,35 @@ app.post('/api/photos/save', async (req, res) => {
 app.get('/', (req, res) => res.send('NC Deals Backend OK'));
 
 const PORT = process.env.PORT || 3000;
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { nom, email, password, iban, bic } = req.body;
+    const hash = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO fournisseurs (nom, email, iban, bic, password_hash) VALUES ($1, $2, $3, $4, $5) RETURNING id, nom',
+      [nom, email, iban || null, bic || null, hash]
+    );
+    const token = jwt.sign({ id: result.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, nom: result.rows[0].nom, id: result.rows[0].id });
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const result = await pool.query('SELECT * FROM fournisseurs WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+    const fournisseur = result.rows[0];
+    if (!fournisseur.password_hash) return res.status(401).json({ error: 'Compte sans mot de passe — contactez l\'admin.' });
+    const ok = await bcrypt.compare(password, fournisseur.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+    const token = jwt.sign({ id: fournisseur.id, email }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, nom: fournisseur.nom, id: fournisseur.id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.listen(PORT, () => console.log(`Serveur lancé sur le port ${PORT}`));
