@@ -5,7 +5,8 @@ const cloudinary = require('cloudinary').v2;
 const { Pool } = require('pg');
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type'] }));
+app.options('*', cors());
 app.use(express.json());
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
