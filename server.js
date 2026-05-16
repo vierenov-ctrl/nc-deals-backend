@@ -12,6 +12,12 @@ app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','PUT','DELETE','OPTIO
 app.options('*', cors());
 app.use(express.json());
 
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 async function initDB() {
@@ -41,118 +47,22 @@ async function initDB() {
       cree_le TIMESTAMP DEFAULT NOW()
     );
   `);
-    await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
-    await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
-    await pool.query('ALTER TABLE offres ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT \'en_attente\';');
+  await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
+  await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
+  await pool.query("ALTER TABLE offres ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT 'en_attente';");
   console.log('Base de données initialisée');
 }
-
 initDB().catch(console.error);
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+/* ── AUTH ── */
 
-app.post('/api/upload/sign', (req, res) => {
-  const timestamp = Math.round(Date.now() / 1000);
-  const folder = 'nc-deals/offres';
-  const signature = cloudinary.utils.api_sign_request(
-    { timestamp, folder },
-    process.env.CLOUDINARY_API_SECRET
-  );
-  res.json({ signature, timestamp, folder,
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY });
-});
-
-app.post('/api/upload/webhook', async (req, res) => {
-  const { public_id, secure_url } = req.body;
-  await pool.query(
-    'INSERT INTO photos (public_id, url, statut) VALUES ($1, $2, $3)',
-    [public_id, secure_url, 'en_attente']
-  );
-  res.json({ status: 'reçu', public_id });
-});
-
-app.patch('/api/upload/moderate/:photoId', async (req, res) => {
-  const { photoId } = req.params;
-  const { action } = req.body;
-  const statut = action === 'approuver' ? 'approuvee' : 'refusee';
-if (action === 'refuser') {
-  try { await cloudinary.uploader.destroy(photoId); } catch(e) { console.error('Cloudinary destroy error:', e); }
-}
-  await pool.query('UPDATE photos SET statut = $1 WHERE public_id = $2', [statut, photoId]);
-  res.json({ status: statut, photoId });
-});
-
-app.get('/api/admin/photos', async (req, res) => {
-  const result = await pool.query("SELECT * FROM photos WHERE statut = 'en_attente' ORDER BY cree_le DESC");
-  res.json(result.rows);
-});
-app.get('/api/offres', async (req, res) => {
-  const result = await pool.query(`
-    SELECT o.*, f.nom as fournisseur_nom,
-      (SELECT url FROM photos WHERE offre_id = o.id AND statut = 'approuvee' LIMIT 1) as photo_url
-    FROM offres o
-    LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
-    WHERE o.statut = 'approuvee'
-    ORDER BY o.cree_le DESC
-  `);
-   res.json(result.rows);
-});
-// Créer ou mettre à jour un fournisseur
-app.post('/api/fournisseurs', async (req, res) => {
-  const { nom, email, iban, bic } = req.body;
-  const result = await pool.query(
-    `INSERT INTO fournisseurs (nom, email, iban, bic)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (email) DO UPDATE SET iban=$3, bic=$4
-     RETURNING *`,
-    [nom, email, iban, bic]
-  );
-  res.json(result.rows[0]);
-});
-
-// Créer une offre
-app.post('/api/offres', async (req, res) => {
-  const { fournisseur_id, titre, description, prix_xpf } = req.body;
-  const result = await pool.query(
-    `INSERT INTO offres (fournisseur_id, titre, description, prix_xpf)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
-    [fournisseur_id, titre, description, prix_xpf]
-  );
-  res.json(result.rows[0]);
-});
-
-// Lier une photo à une offre
-app.patch('/api/photos/:photoId/offre', async (req, res) => {
-  const { photoId } = req.params;
-  const { offre_id } = req.body;
-  await pool.query('UPDATE photos SET offre_id=$1 WHERE id=$2', [offre_id, photoId]);
-  res.json({ ok: true });
-});
-app.post('/api/photos/save', async (req, res) => {
-  const { public_id, url, offre_id } = req.body;
-  await pool.query(
-    'INSERT INTO photos (public_id, url, offre_id, statut) VALUES ($1, $2, $3, $4)',
-    [public_id, url, offre_id, 'en_attente']
-  );
-  res.json({ ok: true });
-});
-app.get('/', (req, res) => res.send('NC Deals Backend OK'));
-
-const PORT = process.env.PORT || 3000;
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { nom, email, password, iban, bic } = req.body;
     const hash = await bcrypt.hash(password, 10);
     const existing = await pool.query('SELECT id, password_hash FROM fournisseurs WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
-      if (existing.rows[0].password_hash) {
-        return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
-      }
+      if (existing.rows[0].password_hash) return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
       await pool.query('UPDATE fournisseurs SET password_hash = $1, nom = $2 WHERE email = $3', [hash, nom, email]);
       const token = jwt.sign({ id: existing.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({ token, nom, id: existing.rows[0].id });
@@ -163,6 +73,23 @@ app.post('/api/auth/register', async (req, res) => {
     );
     const token = jwt.sign({ id: result.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, nom: result.rows[0].nom, id: result.rows[0].id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const result = await pool.query('SELECT * FROM fournisseurs WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+    const fournisseur = result.rows[0];
+    if (!fournisseur.password_hash) return res.status(401).json({ error: 'Compte sans mot de passe — contactez l\'admin.' });
+    if (fournisseur.actif === false) return res.status(403).json({ error: 'Votre compte a été désactivé. Contactez l\'administrateur.' });
+    const ok = await bcrypt.compare(password, fournisseur.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+    const token = jwt.sign({ id: fournisseur.id, email }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, nom: fournisseur.nom, id: fournisseur.id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -181,51 +108,142 @@ app.post('/api/admin/reset-password', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+/* ── OFFRES ── */
+
+app.get('/api/offres', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const result = await pool.query('SELECT * FROM fournisseurs WHERE email = $1', [email]);
-    if (result.rows.length === 0) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
-    const fournisseur = result.rows[0];
-    if (!fournisseur.password_hash) return res.status(401).json({ error: 'Compte sans mot de passe — contactez l\'admin.' });
-    const ok = await bcrypt.compare(password, fournisseur.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
-    const token = jwt.sign({ id: fournisseur.id, email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, nom: fournisseur.nom, id: fournisseur.id });
+    const result = await pool.query(`
+      SELECT o.*, f.nom as fournisseur_nom,
+        (SELECT url FROM photos WHERE offre_id = o.id AND statut = 'approuvee' LIMIT 1) as photo_url
+      FROM offres o
+      LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+      WHERE o.statut = 'approuvee'
+      ORDER BY o.cree_le DESC
+    `);
+    res.json(result.rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-app.get('/api/admin/fournisseurs', async (req, res) => {
-  const { admin_key } = req.query;
-  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
-  const result = await pool.query('SELECT id, nom, email, iban, bic, actif, cree_le FROM fournisseurs ORDER BY cree_le DESC');
-  res.json(result.rows);
+
+app.post('/api/offres', async (req, res) => {
+  try {
+    const { fournisseur_id, titre, description, prix_xpf } = req.body;
+    const result = await pool.query(
+      "INSERT INTO offres (fournisseur_id, titre, description, prix_xpf, statut) VALUES ($1, $2, $3, $4, 'en_attente') RETURNING id",
+      [fournisseur_id, titre, description || null, prix_xpf || 0]
+    );
+    res.json({ id: result.rows[0].id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
-  const { admin_key, actif } = req.body;
-  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
-  await pool.query('UPDATE fournisseurs SET actif = $1 WHERE id = $2', [actif, req.params.id]);
-  res.json({ ok: true });
-});
+/* ── ADMIN OFFRES ── */
+
 app.get('/api/admin/offres', async (req, res) => {
-  const { admin_key } = req.query;
-  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
-  const result = await pool.query(`
-    SELECT o.*, f.nom as fournisseur_nom,
-      (SELECT url FROM photos WHERE offre_id = o.id LIMIT 1) as photo_url
-    FROM offres o
-    LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
-    ORDER BY o.cree_le DESC
-  `);
-  res.json(result.rows);
+  try {
+    const { admin_key } = req.query;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const result = await pool.query(`
+      SELECT o.*, f.nom as fournisseur_nom,
+        (SELECT url FROM photos WHERE offre_id = o.id LIMIT 1) as photo_url
+      FROM offres o LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+      ORDER BY o.cree_le DESC
+    `);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch('/api/admin/offres/:id/statut', async (req, res) => {
-  const { admin_key, statut } = req.body;
-  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
-  await pool.query('UPDATE offres SET statut = $1 WHERE id = $2', [statut, req.params.id]);
-  res.json({ ok: true });
+  try {
+    const { admin_key, statut } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    await pool.query('UPDATE offres SET statut = $1 WHERE id = $2', [statut, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
+
+/* ── ADMIN FOURNISSEURS ── */
+
+app.get('/api/admin/fournisseurs', async (req, res) => {
+  try {
+    const { admin_key } = req.query;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const result = await pool.query('SELECT id, nom, email, iban, bic, actif, cree_le FROM fournisseurs ORDER BY cree_le DESC');
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
+  try {
+    const { admin_key, actif } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    await pool.query('UPDATE fournisseurs SET actif = $1 WHERE id = $2', [actif, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ── PHOTOS ── */
+
+app.post('/api/photos/save', async (req, res) => {
+  try {
+    const { public_id, url, offre_id } = req.body;
+    await pool.query(
+      "INSERT INTO photos (public_id, url, offre_id, statut) VALUES ($1, $2, $3, 'en_attente')",
+      [public_id, url, offre_id]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/photos', async (req, res) => {
+  try {
+    const { admin_key } = req.query;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const result = await pool.query("SELECT * FROM photos WHERE statut = 'en_attente' ORDER BY cree_le DESC");
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/upload/moderate/:photoId', async (req, res) => {
+  try {
+    const { photoId } = req.params;
+    const { action, admin_key } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const statut = action === 'approuver' ? 'approuvee' : 'refusee';
+    if (action === 'refuser') {
+      try { await cloudinary.uploader.destroy(photoId); } catch (e) { console.error('Cloudinary destroy error:', e); }
+    }
+    await pool.query('UPDATE photos SET statut = $1 WHERE public_id = $2', [statut, photoId]);
+    res.json({ status: statut, photoId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ── FOURNISSEURS ── */
+
+app.get('/api/fournisseurs', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, nom, email, iban, bic, cree_le FROM fournisseurs ORDER BY cree_le DESC');
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Serveur lancé sur le port ${PORT}`));
