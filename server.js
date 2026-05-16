@@ -41,7 +41,8 @@ async function initDB() {
       cree_le TIMESTAMP DEFAULT NOW()
     );
   `);
-  await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
+    await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
+    await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
   console.log('Base de données initialisée');
 }
 
@@ -188,5 +189,18 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+app.get('/api/admin/fournisseurs', async (req, res) => {
+  const { admin_key } = req.query;
+  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+  const result = await pool.query('SELECT id, nom, email, iban, bic, actif, cree_le FROM fournisseurs ORDER BY cree_le DESC');
+  res.json(result.rows);
+});
+
+app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
+  const { admin_key, actif } = req.body;
+  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+  await pool.query('UPDATE fournisseurs SET actif = $1 WHERE id = $2', [actif, req.params.id]);
+  res.json({ ok: true });
 });
 app.listen(PORT, () => console.log(`Serveur lancé sur le port ${PORT}`));
