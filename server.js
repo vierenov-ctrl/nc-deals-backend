@@ -119,7 +119,14 @@ app.patch('/api/photos/:photoId/offre', async (req, res) => {
   await pool.query('UPDATE photos SET offre_id=$1 WHERE id=$2', [offre_id, photoId]);
   res.json({ ok: true });
 });
-
+app.post('/api/photos/save', async (req, res) => {
+  const { public_id, url, offre_id } = req.body;
+  await pool.query(
+    'INSERT INTO photos (public_id, url, offre_id, statut) VALUES ($1, $2, $3, $4) ON CONFLICT (public_id) DO UPDATE SET offre_id=$3',
+    [public_id, url, offre_id, 'en_attente']
+  );
+  res.json({ ok: true });
+});
 app.get('/', (req, res) => res.send('NC Deals Backend OK'));
 
 const PORT = process.env.PORT || 3000;
