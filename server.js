@@ -74,7 +74,9 @@ app.patch('/api/upload/moderate/:photoId', async (req, res) => {
   const { photoId } = req.params;
   const { action } = req.body;
   const statut = action === 'approuver' ? 'approuvee' : 'refusee';
-  if (action === 'refuser') await cloudinary.uploader.destroy(photoId);
+if (action === 'refuser') {
+  try { await cloudinary.uploader.destroy(photoId); } catch(e) { console.error('Cloudinary destroy error:', e); }
+}
   await pool.query('UPDATE photos SET statut = $1 WHERE public_id = $2', [statut, photoId]);
   res.json({ status: statut, photoId });
 });
