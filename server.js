@@ -43,6 +43,7 @@ async function initDB() {
   `);
     await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
     await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
+    await pool.query('ALTER TABLE offres ADD COLUMN IF NOT EXISTS statut VARCHAR(20) DEFAULT \'en_attente\';');
   console.log('Base de données initialisée');
 }
 
@@ -91,10 +92,15 @@ app.get('/api/admin/photos', async (req, res) => {
   res.json(result.rows);
 });
 app.get('/api/offres', async (req, res) => {
-  const result = await pool.query(
-    "SELECT o.*, p.url as photo_url FROM offres o LEFT JOIN photos p ON p.offre_id = o.id AND p.statut = 'approuvee' ORDER BY o.cree_le DESC"
-  );
-  res.json(result.rows);
+  const result = await pool.query(`
+    SELECT o.*, f.nom as fournisseur_nom,
+      (SELECT url FROM photos WHERE offre_id = o.id AND statut = 'approuvee' LIMIT 1) as photo_url
+    FROM offres o
+    LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+    WHERE o.statut = 'approuvee'
+    ORDER BY o.cree_le DESC
+  `);
+   res.json(result.rows);
 });
 // Créer ou mettre à jour un fournisseur
 app.post('/api/fournisseurs', async (req, res) => {
@@ -201,6 +207,25 @@ app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
   const { admin_key, actif } = req.body;
   if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
   await pool.query('UPDATE fournisseurs SET actif = $1 WHERE id = $2', [actif, req.params.id]);
+  res.json({ ok: true });
+});
+app.get('/api/admin/offres', async (req, res) => {
+  const { admin_key } = req.query;
+  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+  const result = await pool.query(`
+    SELECT o.*, f.nom as fournisseur_nom,
+      (SELECT url FROM photos WHERE offre_id = o.id LIMIT 1) as photo_url
+    FROM offres o
+    LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+    ORDER BY o.cree_le DESC
+  `);
+  res.json(result.rows);
+});
+
+app.patch('/api/admin/offres/:id/statut', async (req, res) => {
+  const { admin_key, statut } = req.body;
+  if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+  await pool.query('UPDATE offres SET statut = $1 WHERE id = $2', [statut, req.params.id]);
   res.json({ ok: true });
 });
 app.listen(PORT, () => console.log(`Serveur lancé sur le port ${PORT}`));
