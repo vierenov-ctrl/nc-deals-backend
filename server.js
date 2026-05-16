@@ -122,7 +122,7 @@ app.patch('/api/photos/:photoId/offre', async (req, res) => {
 app.post('/api/photos/save', async (req, res) => {
   const { public_id, url, offre_id } = req.body;
   await pool.query(
-    'INSERT INTO photos (public_id, url, offre_id, statut) VALUES ($1, $2, $3, $4) ON CONFLICT (public_id) DO UPDATE SET offre_id=$3',
+    'INSERT INTO photos (public_id, url, offre_id, statut) VALUES ($1, $2, $3, $4)',
     [public_id, url, offre_id, 'en_attente']
   );
   res.json({ ok: true });
