@@ -141,6 +141,15 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { nom, email, password, iban, bic } = req.body;
     const hash = await bcrypt.hash(password, 10);
+    const existing = await pool.query('SELECT id, password_hash FROM fournisseurs WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      if (existing.rows[0].password_hash) {
+        return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
+      }
+      await pool.query('UPDATE fournisseurs SET password_hash = $1, nom = $2 WHERE email = $3', [hash, nom, email]);
+      const token = jwt.sign({ id: existing.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
+      return res.json({ token, nom, id: existing.rows[0].id });
+    }
     const result = await pool.query(
       'INSERT INTO fournisseurs (nom, email, iban, bic, password_hash) VALUES ($1, $2, $3, $4, $5) RETURNING id, nom',
       [nom, email, iban || null, bic || null, hash]
@@ -148,7 +157,19 @@ app.post('/api/auth/register', async (req, res) => {
     const token = jwt.sign({ id: result.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, nom: result.rows[0].nom, id: result.rows[0].id });
   } catch (e) {
-    if (e.code === '23505') return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/reset-password', async (req, res) => {
+  try {
+    const { email, new_password, admin_key } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Clé admin incorrecte.' });
+    const hash = await bcrypt.hash(new_password, 10);
+    const result = await pool.query('UPDATE fournisseurs SET password_hash = $1 WHERE email = $2 RETURNING id', [hash, email]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Email introuvable.' });
+    res.json({ ok: true });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
