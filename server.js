@@ -46,6 +46,14 @@ async function initDB() {
       statut VARCHAR(20) DEFAULT 'en_attente',
       cree_le TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS paiements (
+      id SERIAL PRIMARY KEY,
+      fournisseur_id INTEGER REFERENCES fournisseurs(id),
+      montant_xpf INTEGER NOT NULL,
+      reference VARCHAR(255),
+      note TEXT,
+      cree_le TIMESTAMP DEFAULT NOW()
+    );
   `);
   await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);');
   await pool.query('ALTER TABLE fournisseurs ADD COLUMN IF NOT EXISTS actif BOOLEAN DEFAULT true;');
@@ -60,17 +68,18 @@ initDB().catch(console.error);
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { nom, email, password, iban, bic } = req.body;
+    if (!iban) return res.status(400).json({ error: 'L\'IBAN est obligatoire pour recevoir vos paiements.' });
     const hash = await bcrypt.hash(password, 10);
     const existing = await pool.query('SELECT id, password_hash FROM fournisseurs WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       if (existing.rows[0].password_hash) return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
-      await pool.query('UPDATE fournisseurs SET password_hash = $1, nom = $2 WHERE email = $3', [hash, nom, email]);
+      await pool.query('UPDATE fournisseurs SET password_hash = $1, nom = $2, iban = $3 WHERE email = $4', [hash, nom, iban, email]);
       const token = jwt.sign({ id: existing.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({ token, nom, id: existing.rows[0].id });
     }
     const result = await pool.query(
       'INSERT INTO fournisseurs (nom, email, iban, bic, password_hash) VALUES ($1, $2, $3, $4, $5) RETURNING id, nom',
-      [nom, email, iban || null, bic || null, hash]
+      [nom, email, iban, bic || null, hash]
     );
     const token = jwt.sign({ id: result.rows[0].id, email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, nom: result.rows[0].nom, id: result.rows[0].id });
@@ -90,7 +99,7 @@ app.post('/api/auth/login', async (req, res) => {
     const ok = await bcrypt.compare(password, fournisseur.password_hash);
     if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
     const token = jwt.sign({ id: fournisseur.id, email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, nom: fournisseur.nom, id: fournisseur.id });
+    res.json({ token, nom: fournisseur.nom, id: fournisseur.id, iban: fournisseur.iban });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -209,6 +218,51 @@ app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
   }
 });
 
+/* ── PAIEMENTS ── */
+
+app.post('/api/admin/paiements', async (req, res) => {
+  try {
+    const { admin_key, fournisseur_id, montant_xpf, reference, note } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    if (!fournisseur_id || !montant_xpf) return res.status(400).json({ error: 'Fournisseur et montant requis.' });
+    await pool.query(
+      'INSERT INTO paiements (fournisseur_id, montant_xpf, reference, note) VALUES ($1, $2, $3, $4)',
+      [fournisseur_id, montant_xpf, reference || null, note || null]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/paiements', async (req, res) => {
+  try {
+    const { admin_key } = req.query;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const result = await pool.query(`
+      SELECT p.*, f.nom as fournisseur_nom, f.iban
+      FROM paiements p
+      LEFT JOIN fournisseurs f ON f.id = p.fournisseur_id
+      ORDER BY p.cree_le DESC
+    `);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/fournisseurs/:id/paiements', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM paiements WHERE fournisseur_id = $1 ORDER BY cree_le DESC',
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 /* ── PHOTOS ── */
 
 app.post('/api/photos/save', async (req, res) => {
@@ -250,8 +304,6 @@ app.patch('/api/upload/moderate/:photoId', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-/* ── FOURNISSEURS ── */
 
 app.get('/api/fournisseurs', async (req, res) => {
   try {
