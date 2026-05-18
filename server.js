@@ -6,10 +6,42 @@ const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
 const { Pool } = require('pg');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+const TAUX_COMMISSION = 0.04;
+const XPF_PAR_EUR = 119.33174;
 
 const app = express();
-app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type'] }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PATCH','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','stripe-signature'] }));
 app.options('*', cors());
+
+/* ── WEBHOOK STRIPE — doit être AVANT express.json() ── */
+app.post('/api/webhook-stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature error:', err.message);
+    return res.status(400).send('Webhook Error: ' + err.message);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const { offre_id, fournisseur_id, montant_xpf } = session.metadata;
+    const commission = Math.round(parseInt(montant_xpf) * TAUX_COMMISSION);
+    try {
+      await pool.query(
+        `INSERT INTO commandes (offre_id, fournisseur_id, client_email, montant_xpf, commission_xpf, stripe_session_id)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (stripe_session_id) DO NOTHING`,
+        [parseInt(offre_id), parseInt(fournisseur_id), session.customer_email, parseInt(montant_xpf), commission, session.id]
+      );
+    } catch (e) { console.error('DB error webhook:', e.message); }
+  }
+
+  res.json({ received: true });
+});
+
 app.use(express.json());
 
 cloudinary.config({
@@ -52,6 +84,17 @@ async function initDB() {
       montant_xpf INTEGER NOT NULL,
       reference VARCHAR(255),
       note TEXT,
+      cree_le TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS commandes (
+      id SERIAL PRIMARY KEY,
+      offre_id INTEGER REFERENCES offres(id),
+      fournisseur_id INTEGER REFERENCES fournisseurs(id),
+      client_email VARCHAR(255),
+      montant_xpf INTEGER,
+      commission_xpf INTEGER,
+      stripe_session_id VARCHAR(255) UNIQUE,
+      statut VARCHAR(20) DEFAULT 'paye',
       cree_le TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -146,7 +189,7 @@ app.get('/api/offres/:id', async (req, res) => {
     `, [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Offre introuvable.' });
     const photos = await pool.query("SELECT url FROM photos WHERE offre_id = $1 AND statut = 'approuvee' ORDER BY cree_le ASC", [req.params.id]);
-    res.json({ ...result.rows[0], photos: photos.rows.map(function(p) { return p.url; }) });
+    res.json({ ...result.rows[0], photos: photos.rows.map(p => p.url) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -160,6 +203,73 @@ app.post('/api/offres', async (req, res) => {
       [fournisseur_id, titre, description || null, prix_xpf || 0, categorie || 'Autres']
     );
     res.json({ id: result.rows[0].id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ── STRIPE PAIEMENT ── */
+
+app.post('/api/creer-paiement', async (req, res) => {
+  try {
+    const { offre_id, client_email } = req.body;
+    if (!offre_id || !client_email) return res.status(400).json({ error: 'offre_id et client_email requis.' });
+
+    const result = await pool.query(`
+      SELECT o.*, f.nom as fournisseur_nom
+      FROM offres o LEFT JOIN fournisseurs f ON f.id = o.fournisseur_id
+      WHERE o.id = $1 AND o.statut = 'approuvee'
+    `, [offre_id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Offre introuvable.' });
+
+    const offre = result.rows[0];
+    const montant_eur_cents = Math.round((offre.prix_xpf / XPF_PAR_EUR) * 100);
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      customer_email: client_email,
+      line_items: [{
+        price_data: {
+          currency: 'eur',
+          unit_amount: montant_eur_cents,
+          product_data: {
+            name: offre.titre,
+            description: offre.description || ('NC Deals — ' + (offre.categorie || 'Offre')),
+          },
+        },
+        quantity: 1,
+      }],
+      metadata: {
+        offre_id: String(offre_id),
+        fournisseur_id: String(offre.fournisseur_id),
+        montant_xpf: String(offre.prix_xpf),
+      },
+      success_url: 'https://vierenov-ctrl.github.io/nc-deals-frontend/succes.html?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: 'https://vierenov-ctrl.github.io/nc-deals-frontend/offre.html?id=' + offre_id,
+    });
+
+    res.json({ url: session.url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ── ADMIN COMMANDES ── */
+
+app.get('/api/admin/commandes', async (req, res) => {
+  try {
+    const { admin_key } = req.query;
+    if (admin_key !== process.env.ADMIN_KEY) return res.status(403).json({ error: 'Acces refuse.' });
+    const result = await pool.query(`
+      SELECT c.*, o.titre as offre_titre, f.nom as fournisseur_nom, f.iban
+      FROM commandes c
+      LEFT JOIN offres o ON o.id = c.offre_id
+      LEFT JOIN fournisseurs f ON f.id = c.fournisseur_id
+      ORDER BY c.cree_le DESC
+    `);
+    const total_commissions = result.rows.reduce((s, r) => s + (r.commission_xpf || 0), 0);
+    res.json({ commandes: result.rows, total_commissions });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -218,7 +328,7 @@ app.patch('/api/admin/fournisseurs/:id/statut', async (req, res) => {
   }
 });
 
-/* ── PAIEMENTS ── */
+/* ── PAIEMENTS (virements manuels) ── */
 
 app.post('/api/admin/paiements', async (req, res) => {
   try {
